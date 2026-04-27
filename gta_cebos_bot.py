@@ -404,4 +404,9 @@ async def help_command(ctx):
 
 # Ejecutar el bot
 if __name__ == "__main__":
-    
+    # Carga el token desde las variables de entorno de Railway
+    TOKEN = os.getenv("TOKEN")
+    if TOKEN:
+        bot.run(TOKEN)
+    else:
+        print("❌ Error: No se encontró la variable 'TOKEN' en Railway")
