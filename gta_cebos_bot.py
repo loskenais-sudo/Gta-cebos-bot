@@ -404,5 +404,4 @@ async def help_command(ctx):
 
 # Ejecutar el bot
 if __name__ == "__main__":
-    TOKEN = "MTQ5ODMzNzc4MTg2NzYxMDI4Ng.GFyKfU.N7ETnzbJaXMkZqVKFeHGlv-CiKAAJL1Uvff6uI"  # Reemplaza con tu token
-    bot.run(TOKEN)
+    
