@@ -42,6 +42,15 @@ class CebosDatabase:
         """Obtiene la información de un usuario"""
         return self.data['usuarios'].get(user_id)
     
+    def tiene_nombre(self, user_id: str) -> bool:
+        """Comprueba si un usuario tiene nombre registrado"""
+        usuario = self.get_usuario_info(user_id)
+        if not usuario:
+            return False
+        nombre = usuario.get('nombre', '').strip()
+        apellido = usuario.get('apellido', '').strip()
+        return bool(nombre or apellido)
+    
     def crear_usuario(self, user_id: str, nombre: str, apellido: str) -> dict:
         """Crea o actualiza un usuario"""
         today = datetime.now().strftime('%Y-%m-%d')
@@ -61,12 +70,34 @@ class CebosDatabase:
                 self.data['usuarios'][user_id]['cebos_hoy'] = 0
                 self.data['usuarios'][user_id]['fecha_actual'] = today
             
-            # Actualizar nombre y apellido si cambiaron
+            # Actualizar nombre y apellido solo si se proporcionan
+            if nombre:
+                self.data['usuarios'][user_id]['nombre'] = nombre
+            if apellido:
+                self.data['usuarios'][user_id]['apellido'] = apellido
+        
+        self.save_data()
+        return self.data['usuarios'][user_id]
+    
+    def set_nombre(self, user_id: str, nombre: str, apellido: str) -> str:
+        """Asigna o actualiza el nombre de un usuario existente"""
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        if user_id not in self.data['usuarios']:
+            # Crear usuario nuevo con nombre
+            self.data['usuarios'][user_id] = {
+                'nombre': nombre,
+                'apellido': apellido,
+                'cebos_hoy': 0,
+                'fecha_actual': today,
+                'historial': []
+            }
+        else:
             self.data['usuarios'][user_id]['nombre'] = nombre
             self.data['usuarios'][user_id]['apellido'] = apellido
         
         self.save_data()
-        return self.data['usuarios'][user_id]
+        return f"✅ Nombre registrado: **{nombre} {apellido}** para el ID `{user_id}`"
     
     def get_cebos_disponibles(self, user_id: str) -> Tuple[int, int]:
         """Retorna (cebos_usados_hoy, cebos_disponibles)"""
@@ -150,7 +181,7 @@ class CebosDatabase:
         if veto['tipo'] == 'temporal' and veto['hasta']:
             fecha_hasta = datetime.fromisoformat(veto['hasta'])
             if datetime.now() > fecha_hasta:
-                # Veto expirado, desvetar
+                # Veto expirado, desvetar automáticamente
                 del self.data['vetados'][user_id]
                 self.save_data()
                 return False, ""
@@ -160,9 +191,38 @@ class CebosDatabase:
         if tipo == 'temporal':
             fecha_hasta = datetime.fromisoformat(veto['hasta'])
             dias_restantes = (fecha_hasta - datetime.now()).days
-            return True, f"🚫 Usuario vetado {tipo} por: {motivo}. Días restantes: {dias_restantes}"
+            return True, f"🚫 Usuario vetado temporalmente por: {motivo}. Días restantes: {dias_restantes}"
         else:
             return True, f"🚫 Usuario vetado permanentemente por: {motivo}"
+    
+    def get_lista_vetados(self) -> list:
+        """Devuelve la lista de usuarios vetados con sus nombres si están registrados"""
+        resultado = []
+        for user_id, veto in self.data['vetados'].items():
+            # Comprobar si el veto temporal ha expirado
+            if veto['tipo'] == 'temporal' and veto['hasta']:
+                fecha_hasta = datetime.fromisoformat(veto['hasta'])
+                if datetime.now() > fecha_hasta:
+                    continue  # Saltar vetados expirados (se limpiarán al consultarlos individualmente)
+            
+            usuario = self.get_usuario_info(user_id)
+            if usuario:
+                nombre = usuario.get('nombre', '').strip()
+                apellido = usuario.get('apellido', '').strip()
+                nombre_completo = f"{nombre} {apellido}".strip() if (nombre or apellido) else "⚠️ Sin nombre"
+            else:
+                nombre_completo = "⚠️ Sin nombre"
+            
+            resultado.append({
+                'id': user_id,
+                'nombre': nombre_completo,
+                'tipo': veto['tipo'],
+                'motivo': veto['motivo'],
+                'hasta': veto.get('hasta'),
+                'fecha_veto': veto.get('fecha_veto')
+            })
+        
+        return resultado
 
 # Instancia de la base de datos
 db = CebosDatabase()
@@ -170,7 +230,7 @@ db = CebosDatabase()
 @bot.event
 async def on_ready():
     print(f'✅ Bot conectado como {bot.user}')
-    print('Comandos disponibles: !cebos, !añadir, !vetar, !desvetar, !info, !ayuda')
+    print('Comandos disponibles: !cebos, !añadir, !vetar, !desvetar, !usuario, !nombre, !vetados, !ayuda')
 
 @bot.command(name='cebos')
 async def check_cebos(ctx, user_id: str):
@@ -180,7 +240,7 @@ async def check_cebos(ctx, user_id: str):
     Ejemplo: !cebos F1603Q49
     """
     
-    # Comprobar veto
+    # Comprobar veto ANTES de cualquier otra cosa
     vetado, msg_veto = db.check_veto(user_id)
     if vetado:
         embed = discord.Embed(
@@ -191,15 +251,33 @@ async def check_cebos(ctx, user_id: str):
         await ctx.send(embed=embed)
         return
     
-    # Crear o actualizar usuario
-    usuario = db.crear_usuario(user_id, "", "")
+    # Obtener usuario sin crear uno vacío
+    usuario = db.get_usuario_info(user_id)
+    if not usuario:
+        # Crear el registro básico vacío
+        usuario = db.crear_usuario(user_id, "", "")
+    
     cebos_usados, cebos_disponibles = db.get_cebos_disponibles(user_id)
+    
+    nombre = usuario.get('nombre', '').strip()
+    apellido = usuario.get('apellido', '').strip()
+    nombre_completo = f"{nombre} {apellido}".strip() if (nombre or apellido) else None
     
     embed = discord.Embed(
         title=f"📊 Estado de Cebos",
         color=discord.Color.blue()
     )
     embed.add_field(name="ID Usuario", value=user_id, inline=False)
+    
+    if nombre_completo:
+        embed.add_field(name="Nombre", value=nombre_completo, inline=False)
+    else:
+        embed.add_field(
+            name="⚠️ Sin nombre registrado",
+            value=f"Usa `!nombre {user_id} Nombre Apellido` para registrar el nombre de este usuario.",
+            inline=False
+        )
+    
     embed.add_field(name="Cebos Usados Hoy", value=f"🟢 {cebos_usados}", inline=True)
     embed.add_field(name="Cebos Disponibles", value=f"🔵 {cebos_disponibles}", inline=True)
     embed.add_field(name="Límite Diario", value=f"⚫ {CEBOS_LIMIT}", inline=True)
@@ -215,12 +293,12 @@ async def add_cebos(ctx, user_id: str, cantidad: int):
     Ejemplo: !añadir F1603Q49 5
     """
     
-    # Comprobar veto
+    # Comprobar veto PRIMERO — si está vetado, no se añade nada
     vetado, msg_veto = db.check_veto(user_id)
     if vetado:
         embed = discord.Embed(
-            title="❌ Usuario Vetado",
-            description=msg_veto,
+            title="❌ Usuario Vetado — Cebos NO añadidos",
+            description=f"{msg_veto}\n\nNo se pueden añadir cebos a un usuario vetado.",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
@@ -231,8 +309,9 @@ async def add_cebos(ctx, user_id: str, cantidad: int):
         await ctx.send("❌ La cantidad debe ser mayor a 0")
         return
     
-    # Crear o actualizar usuario
-    db.crear_usuario(user_id, "", "")
+    # Crear registro si no existe (sin nombre)
+    if not db.get_usuario_info(user_id):
+        db.crear_usuario(user_id, "", "")
     
     # Intentar añadir cebos
     éxito, mensaje = db.añadir_cebos(user_id, cantidad)
@@ -247,10 +326,37 @@ async def add_cebos(ctx, user_id: str, cantidad: int):
     )
     embed.add_field(name="Usuario", value=user_id, inline=False)
     
+    # Avisar si no tiene nombre
+    if éxito and not db.tiene_nombre(user_id):
+        embed.add_field(
+            name="⚠️ Sin nombre registrado",
+            value=f"Usa `!nombre {user_id} Nombre Apellido` para registrar el nombre de este usuario.",
+            inline=False
+        )
+    
     if éxito:
         cebos_usados, cebos_disponibles = db.get_cebos_disponibles(user_id)
         embed.add_field(name="Cebos Usados Hoy", value=cebos_usados, inline=True)
         embed.add_field(name="Cebos Disponibles", value=cebos_disponibles, inline=True)
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='nombre')
+async def set_nombre(ctx, user_id: str, nombre: str, apellido: str):
+    """
+    Asigna o actualiza el nombre y apellido de un usuario
+    Uso: !nombre ID NOMBRE APELLIDO
+    Ejemplo: !nombre F1603Q49 Nero Kiraman
+    """
+    
+    mensaje = db.set_nombre(user_id, nombre, apellido)
+    
+    embed = discord.Embed(
+        title="✏️ Nombre Actualizado",
+        description=mensaje,
+        color=discord.Color.green()
+    )
+    embed.set_footer(text=f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     await ctx.send(embed=embed)
 
@@ -320,28 +426,41 @@ async def unban_user(ctx, user_id: str):
     
     await ctx.send(embed=embed)
 
-@bot.command(name='info')
+@bot.command(name='usuario')
 async def user_info(ctx, user_id: str):
     """
     Muestra información completa de un usuario
-    Uso: !info ID
+    Uso: !usuario ID
     """
     
     usuario = db.get_usuario_info(user_id)
     
     if not usuario:
-        await ctx.send(f"❌ Usuario {user_id} no encontrado en la base de datos")
+        await ctx.send(f"❌ Usuario `{user_id}` no encontrado en la base de datos")
         return
     
     vetado, msg_veto = db.check_veto(user_id)
     cebos_usados, cebos_disponibles = db.get_cebos_disponibles(user_id)
+    
+    nombre = usuario.get('nombre', '').strip()
+    apellido = usuario.get('apellido', '').strip()
+    nombre_completo = f"{nombre} {apellido}".strip() if (nombre or apellido) else None
     
     embed = discord.Embed(
         title=f"👤 Información del Usuario",
         color=discord.Color.purple()
     )
     embed.add_field(name="ID", value=user_id, inline=False)
-    embed.add_field(name="Nombre Completo", value=f"{usuario['nombre']} {usuario['apellido']}", inline=False)
+    
+    if nombre_completo:
+        embed.add_field(name="Nombre Completo", value=nombre_completo, inline=False)
+    else:
+        embed.add_field(
+            name="⚠️ Sin nombre registrado",
+            value=f"Usa `!nombre {user_id} Nombre Apellido` para registrar el nombre de este usuario.",
+            inline=False
+        )
+    
     embed.add_field(name="Estado", value="🚫 Vetado" if vetado else "✅ Activo", inline=True)
     embed.add_field(name="Cebos Hoy", value=f"{cebos_usados}/{CEBOS_LIMIT}", inline=True)
     embed.add_field(name="Historial de Transacciones", 
@@ -351,6 +470,46 @@ async def user_info(ctx, user_id: str):
     if vetado:
         embed.add_field(name="Detalles de Veto", value=msg_veto, inline=False)
     
+    await ctx.send(embed=embed)
+
+@bot.command(name='vetados')
+async def lista_vetados(ctx):
+    """
+    Muestra la lista de todos los usuarios vetados
+    Uso: !vetados
+    """
+    
+    lista = db.get_lista_vetados()
+    
+    if not lista:
+        embed = discord.Embed(
+            title="✅ No hay usuarios vetados",
+            description="No hay ningún usuario vetado actualmente.",
+            color=discord.Color.green()
+        )
+        await ctx.send(embed=embed)
+        return
+    
+    embed = discord.Embed(
+        title=f"🚫 Usuarios Vetados ({len(lista)})",
+        color=discord.Color.red()
+    )
+    
+    for v in lista:
+        if v['tipo'] == 'temporal' and v['hasta']:
+            fecha_hasta = datetime.fromisoformat(v['hasta'])
+            dias_restantes = max(0, (fecha_hasta - datetime.now()).days)
+            tipo_str = f"Temporal · {dias_restantes} días restantes"
+        else:
+            tipo_str = "Permanente"
+        
+        embed.add_field(
+            name=f"🔴 {v['nombre']} — `{v['id']}`",
+            value=f"**Tipo:** {tipo_str}\n**Motivo:** {v['motivo']}",
+            inline=False
+        )
+    
+    embed.set_footer(text=f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     await ctx.send(embed=embed)
 
 @bot.command(name='ayuda')
@@ -364,37 +523,49 @@ async def help_command(ctx):
     
     embed.add_field(
         name="!cebos <ID>",
-        value="Comprueba cebos disponibles\nEj: !cebos XXXXXXXX",
+        value="Comprueba cebos disponibles\nEj: `!cebos F1603Q49`",
         inline=False
     )
     
     embed.add_field(
         name="!añadir <ID> <CANTIDAD>",
-        value="Añade cebos a un usuario\nEj: !añadir XXXXXXXX 5",
+        value="Añade cebos a un usuario\nEj: `!añadir F1603Q49 5`",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="!nombre <ID> <NOMBRE> <APELLIDO>",
+        value="Registra o actualiza el nombre de un usuario\nEj: `!nombre F1603Q49 Nero Kiraman`",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="!usuario <ID>",
+        value="Muestra información completa del usuario\nEj: `!usuario F1603Q49`",
         inline=False
     )
     
     embed.add_field(
         name="!vetar <ID> temporal <MOTIVO> <DÍAS>",
-        value="Veta temporalmente un usuario\nEj: !vetar XXXXXXXX temporal Mal comportamiento 7",
+        value="Veta temporalmente un usuario *(admin)*\nEj: `!vetar F1603Q49 temporal Mal comportamiento 7`",
         inline=False
     )
     
     embed.add_field(
         name="!vetar <ID> permanente <MOTIVO>",
-        value="Veta permanentemente un usuario\nEj: !vetar XXXXXXXX permanente Estafa",
+        value="Veta permanentemente un usuario *(admin)*\nEj: `!vetar F1603Q49 permanente Estafa`",
         inline=False
     )
     
     embed.add_field(
         name="!desvetar <ID>",
-        value="Desveta un usuario\nEj: !desvetar XXXXXXXX",
+        value="Desveta un usuario *(admin)*\nEj: `!desvetar F1603Q49`",
         inline=False
     )
     
     embed.add_field(
-        name="!info <ID>",
-        value="Muestra información del usuario\nEj: !info XXXXXXXX",
+        name="!vetados",
+        value="Muestra la lista de todos los usuarios vetados\nEj: `!vetados`",
         inline=False
     )
     
