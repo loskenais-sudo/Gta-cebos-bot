@@ -364,37 +364,37 @@ async def help_command(ctx):
     
     embed.add_field(
         name="!cebos <ID>",
-        value="Comprueba cebos disponibles\nEj: !cebos F1603Q49",
+        value="Comprueba cebos disponibles\nEj: !cebos XXXXXXXX",
         inline=False
     )
     
     embed.add_field(
         name="!añadir <ID> <CANTIDAD>",
-        value="Añade cebos a un usuario\nEj: !añadir F1603Q49 5",
+        value="Añade cebos a un usuario\nEj: !añadir XXXXXXXX 5",
         inline=False
     )
     
     embed.add_field(
         name="!vetar <ID> temporal <MOTIVO> <DÍAS>",
-        value="Veta temporalmente un usuario\nEj: !vetar F1603Q49 temporal Mal comportamiento 7",
+        value="Veta temporalmente un usuario\nEj: !vetar XXXXXXXX temporal Mal comportamiento 7",
         inline=False
     )
     
     embed.add_field(
         name="!vetar <ID> permanente <MOTIVO>",
-        value="Veta permanentemente un usuario\nEj: !vetar F1603Q49 permanente Estafa",
+        value="Veta permanentemente un usuario\nEj: !vetar XXXXXXXX permanente Estafa",
         inline=False
     )
     
     embed.add_field(
         name="!desvetar <ID>",
-        value="Desveta un usuario\nEj: !desvetar F1603Q49",
+        value="Desveta un usuario\nEj: !desvetar XXXXXXXX",
         inline=False
     )
     
     embed.add_field(
         name="!info <ID>",
-        value="Muestra información del usuario\nEj: !info F1603Q49",
+        value="Muestra información del usuario\nEj: !info XXXXXXXX",
         inline=False
     )
     
