@@ -1,0 +1,2 @@
+[deploy]
+startCommand = "python gta_cebos_bot.py"
