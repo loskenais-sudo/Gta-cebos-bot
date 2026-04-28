@@ -1,11 +1,11 @@
 import discord
 from discord.ext import commands, tasks
 from discord.ui import Button, View
-import json
 import os
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 import pytz
+from pymongo import MongoClient
 
 # Zona horaria de España
 TZ_SPAIN = pytz.timezone('Europe/Madrid')
@@ -15,52 +15,27 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Archivo de base de datos JSON
-DATABASE_FILE = 'cebos_data.json'
-
 # Límite de cebos por día
 CEBOS_LIMIT = 50
 
 class CebosDatabase:
-    """Gestiona la base de datos de cebos"""
-    
+    """Gestiona la base de datos de cebos con MongoDB"""
+
     def __init__(self):
-        self.data = self.load_data()
-    
-    def load_data(self) -> dict:
-        """Carga los datos desde el archivo JSON"""
-        if os.path.exists(DATABASE_FILE):
-            with open(DATABASE_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {
-            'usuarios': {},  # {ID: {'nombre': str, 'apellido': str, 'cebos_hoy': int, 'fecha_actual': str, 'vetados': []}}
-            'vetados': {}    # {ID: {'motivo': str, 'tipo': 'temporal/permanente', 'hasta': str, 'fecha_veto': str}}
-        }
-    
-    def save_data(self):
-        """Guarda los datos en el archivo JSON"""
-        with open(DATABASE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(self.data, f, indent=4, ensure_ascii=False)
-    
-    def get_usuario_info(self, user_id: str) -> Optional[dict]:
-        """Obtiene la información de un usuario"""
-        return self.data['usuarios'].get(user_id)
-    
-    def tiene_nombre(self, user_id: str) -> bool:
-        """Comprueba si un usuario tiene nombre registrado"""
-        usuario = self.get_usuario_info(user_id)
-        if not usuario:
-            return False
-        nombre = usuario.get('nombre', '').strip()
-        apellido = usuario.get('apellido', '').strip()
-        return bool(nombre or apellido)
-    
+        mongo_uri = os.getenv("MONGO_URI")
+        if not mongo_uri:
+            raise RuntimeError("❌ Error: No se encontró la variable 'MONGO_URI' en Railway")
+        client = MongoClient(mongo_uri)
+        db = client["cebos_bot"]
+        self.usuarios = db["usuarios"]
+        self.vetados = db["vetados"]
+
+    # ── Utilidades de tiempo ──────────────────────────────────────────────────
+
     def now_spain(self) -> datetime:
-        """Devuelve la hora actual en España"""
         return datetime.now(TZ_SPAIN)
 
     def today_spain(self) -> str:
-        """Devuelve la fecha actual en España como string YYYY-MM-DD"""
         return self.now_spain().strftime('%Y-%m-%d')
 
     def tiempo_hasta_reset(self) -> str:
@@ -74,189 +49,170 @@ class CebosDatabase:
         minutos = resto // 60
         return f"{horas}h {minutos}min"
 
-    def reset_todos_cebos(self):
-        """Resetea los cebos de todos los usuarios"""
-        today = self.today_spain()
-        for usuario in self.data['usuarios'].values():
-            usuario['cebos_hoy'] = 0
-            usuario['fecha_actual'] = today
-        self.save_data()
+    # ── Usuarios ──────────────────────────────────────────────────────────────
+
+    def get_usuario_info(self, user_id: str) -> Optional[dict]:
+        return self.usuarios.find_one({"_id": user_id})
+
+    def tiene_nombre(self, user_id: str) -> bool:
+        doc = self.get_usuario_info(user_id)
+        if not doc:
+            return False
+        return bool(doc.get('nombre', '').strip() or doc.get('apellido', '').strip())
 
     def crear_usuario(self, user_id: str, nombre: str, apellido: str) -> dict:
-        """Crea o actualiza un usuario"""
         today = self.today_spain()
-        
-        if user_id not in self.data['usuarios']:
-            self.data['usuarios'][user_id] = {
-                'nombre': nombre,
-                'apellido': apellido,
-                'cebos_hoy': 0,
-                'fecha_actual': today,
-                'historial': []
+        doc = self.get_usuario_info(user_id)
+        if not doc:
+            doc = {
+                "_id": user_id,
+                "nombre": nombre,
+                "apellido": apellido,
+                "cebos_hoy": 0,
+                "fecha_actual": today,
+                "historial": []
             }
+            self.usuarios.insert_one(doc)
         else:
-            # Resetear cebos si es un nuevo día
-            fecha_guardada = self.data['usuarios'][user_id].get('fecha_actual', today)
-            if fecha_guardada != today:
-                self.data['usuarios'][user_id]['cebos_hoy'] = 0
-                self.data['usuarios'][user_id]['fecha_actual'] = today
-            
-            # Actualizar nombre y apellido solo si se proporcionan
+            update = {}
+            if doc.get('fecha_actual') != today:
+                update["cebos_hoy"] = 0
+                update["fecha_actual"] = today
             if nombre:
-                self.data['usuarios'][user_id]['nombre'] = nombre
+                update["nombre"] = nombre
             if apellido:
-                self.data['usuarios'][user_id]['apellido'] = apellido
-        
-        self.save_data()
-        return self.data['usuarios'][user_id]
-    
+                update["apellido"] = apellido
+            if update:
+                self.usuarios.update_one({"_id": user_id}, {"$set": update})
+            doc = self.get_usuario_info(user_id)
+        return doc
+
     def set_nombre(self, user_id: str, nombre: str, apellido: str) -> str:
-        """Asigna o actualiza el nombre de un usuario existente"""
         today = self.today_spain()
-        
-        if user_id not in self.data['usuarios']:
-            # Crear usuario nuevo con nombre
-            self.data['usuarios'][user_id] = {
-                'nombre': nombre,
-                'apellido': apellido,
-                'cebos_hoy': 0,
-                'fecha_actual': today,
-                'historial': []
-            }
+        doc = self.get_usuario_info(user_id)
+        if not doc:
+            self.usuarios.insert_one({
+                "_id": user_id,
+                "nombre": nombre,
+                "apellido": apellido,
+                "cebos_hoy": 0,
+                "fecha_actual": today,
+                "historial": []
+            })
         else:
-            self.data['usuarios'][user_id]['nombre'] = nombre
-            self.data['usuarios'][user_id]['apellido'] = apellido
-        
-        self.save_data()
+            self.usuarios.update_one(
+                {"_id": user_id},
+                {"$set": {"nombre": nombre, "apellido": apellido}}
+            )
         return f"✅ Nombre registrado: **{nombre} {apellido}** para el ID `{user_id}`"
-    
+
     def get_cebos_disponibles(self, user_id: str) -> Tuple[int, int]:
-        """Retorna (cebos_usados_hoy, cebos_disponibles)"""
-        usuario = self.get_usuario_info(user_id)
-        if not usuario:
+        doc = self.get_usuario_info(user_id)
+        if not doc:
             return 0, CEBOS_LIMIT
-        
         today = self.today_spain()
-        fecha_guardada = usuario.get('fecha_actual', today)
-        
-        # Si es un nuevo día, resetear
-        if fecha_guardada != today:
-            usuario['cebos_hoy'] = 0
-            usuario['fecha_actual'] = today
-            self.save_data()
-        
-        cebos_usados = usuario['cebos_hoy']
-        cebos_disponibles = max(0, CEBOS_LIMIT - cebos_usados)
-        return cebos_usados, cebos_disponibles
-    
+        if doc.get('fecha_actual') != today:
+            self.usuarios.update_one(
+                {"_id": user_id},
+                {"$set": {"cebos_hoy": 0, "fecha_actual": today}}
+            )
+            doc["cebos_hoy"] = 0
+        cebos_usados = doc.get('cebos_hoy', 0)
+        return cebos_usados, max(0, CEBOS_LIMIT - cebos_usados)
+
     def añadir_cebos(self, user_id: str, cantidad: int) -> Tuple[bool, str]:
-        """Intenta añadir cebos. Retorna (éxito, mensaje)"""
-        usuario = self.get_usuario_info(user_id)
-        if not usuario:
+        doc = self.get_usuario_info(user_id)
+        if not doc:
             return False, "Usuario no encontrado"
-        
         cebos_usados, cebos_disponibles = self.get_cebos_disponibles(user_id)
-        
         if cantidad > cebos_disponibles:
             return False, f"No puedes coger {cantidad} cebos. Solo tienes {cebos_disponibles} disponibles hoy."
-        
-        usuario['cebos_hoy'] += cantidad
-        usuario['historial'].append({
-            'fecha': datetime.now().isoformat(),
-            'cantidad': cantidad,
-            'total_diario': usuario['cebos_hoy']
-        })
-        self.save_data()
-        
-        return True, f"✅ Se han añadido {cantidad} cebos. Total hoy: {usuario['cebos_hoy']}/{CEBOS_LIMIT}"
-    
+        nuevo_total = cebos_usados + cantidad
+        entrada = {
+            "fecha": self.now_spain().isoformat(),
+            "cantidad": cantidad,
+            "total_diario": nuevo_total
+        }
+        self.usuarios.update_one(
+            {"_id": user_id},
+            {"$set": {"cebos_hoy": nuevo_total}, "$push": {"historial": entrada}}
+        )
+        return True, f"✅ Se han añadido {cantidad} cebos. Total hoy: {nuevo_total}/{CEBOS_LIMIT}"
+
+    def reset_todos_cebos(self):
+        today = self.today_spain()
+        self.usuarios.update_many({}, {"$set": {"cebos_hoy": 0, "fecha_actual": today}})
+
+    # ── Vetos ─────────────────────────────────────────────────────────────────
+
     def vetar_usuario(self, user_id: str, motivo: str, tipo: str = 'permanente', dias: int = 0) -> str:
-        """Veta un usuario (temporal o permanente)"""
         if tipo not in ['temporal', 'permanente']:
             return "Tipo de veto inválido. Use 'temporal' o 'permanente'"
-        
         if tipo == 'temporal' and dias <= 0:
             return "Para vetos temporales, especifique días > 0"
-        
-        fecha_veto = datetime.now()
-        fecha_hasta = fecha_veto + timedelta(days=dias) if tipo == 'temporal' else None
-        
-        self.data['vetados'][user_id] = {
-            'motivo': motivo,
-            'tipo': tipo,
-            'hasta': fecha_hasta.isoformat() if fecha_hasta else None,
-            'fecha_veto': fecha_veto.isoformat()
-        }
-        self.save_data()
-        
+        fecha_veto = self.now_spain()
+        fecha_hasta = (fecha_veto + timedelta(days=dias)).isoformat() if tipo == 'temporal' else None
+        self.vetados.update_one(
+            {"_id": user_id},
+            {"$set": {
+                "motivo": motivo,
+                "tipo": tipo,
+                "hasta": fecha_hasta,
+                "fecha_veto": fecha_veto.isoformat()
+            }},
+            upsert=True
+        )
         tipo_texto = f"temporal ({dias} días)" if tipo == 'temporal' else "permanente"
         return f"✅ Usuario {user_id} vetado {tipo_texto}. Motivo: {motivo}"
-    
+
     def desvetar_usuario(self, user_id: str) -> str:
-        """Desveta un usuario"""
-        if user_id not in self.data['vetados']:
+        result = self.vetados.delete_one({"_id": user_id})
+        if result.deleted_count == 0:
             return f"El usuario {user_id} no está vetado"
-        
-        del self.data['vetados'][user_id]
-        self.save_data()
-        return f"✅ Usuario {user_id} devetado"
-    
+        return f"✅ Usuario {user_id} desvetado"
+
     def check_veto(self, user_id: str) -> Tuple[bool, str]:
-        """Comprueba si un usuario está vetado. Retorna (está_vetado, mensaje)"""
-        if user_id not in self.data['vetados']:
+        veto = self.vetados.find_one({"_id": user_id})
+        if not veto:
             return False, ""
-        
-        veto = self.data['vetados'][user_id]
-        
-        # Si es temporal, comprobar si ha expirado
-        if veto['tipo'] == 'temporal' and veto['hasta']:
+        if veto['tipo'] == 'temporal' and veto.get('hasta'):
             fecha_hasta = datetime.fromisoformat(veto['hasta'])
-            if datetime.now() > fecha_hasta:
-                # Veto expirado, desvetar automáticamente
-                del self.data['vetados'][user_id]
-                self.save_data()
+            if self.now_spain() > fecha_hasta:
+                self.vetados.delete_one({"_id": user_id})
                 return False, ""
-        
-        motivo = veto['motivo']
-        tipo = veto['tipo']
-        if tipo == 'temporal':
-            fecha_hasta = datetime.fromisoformat(veto['hasta'])
-            dias_restantes = (fecha_hasta - datetime.now()).days
-            return True, f"🚫 Usuario vetado temporalmente por: {motivo}. Días restantes: {dias_restantes}"
-        else:
-            return True, f"🚫 Usuario vetado permanentemente por: {motivo}"
-    
+            dias_restantes = (fecha_hasta - self.now_spain()).days
+            return True, f"🚫 Usuario vetado temporalmente por: {veto['motivo']}. Días restantes: {dias_restantes}"
+        return True, f"🚫 Usuario vetado permanentemente por: {veto['motivo']}"
+
     def get_lista_vetados(self) -> list:
-        """Devuelve la lista de usuarios vetados con sus nombres si están registrados"""
         resultado = []
-        for user_id, veto in self.data['vetados'].items():
-            # Comprobar si el veto temporal ha expirado
-            if veto['tipo'] == 'temporal' and veto['hasta']:
+        for veto in self.vetados.find():
+            user_id = veto['_id']
+            if veto['tipo'] == 'temporal' and veto.get('hasta'):
                 fecha_hasta = datetime.fromisoformat(veto['hasta'])
-                if datetime.now() > fecha_hasta:
-                    continue  # Saltar vetados expirados (se limpiarán al consultarlos individualmente)
-            
-            usuario = self.get_usuario_info(user_id)
-            if usuario:
-                nombre = usuario.get('nombre', '').strip()
-                apellido = usuario.get('apellido', '').strip()
+                if self.now_spain() > fecha_hasta:
+                    continue
+            doc = self.get_usuario_info(user_id)
+            if doc:
+                nombre = doc.get('nombre', '').strip()
+                apellido = doc.get('apellido', '').strip()
                 nombre_completo = f"{nombre} {apellido}".strip() if (nombre or apellido) else "⚠️ Sin nombre"
             else:
                 nombre_completo = "⚠️ Sin nombre"
-            
             resultado.append({
                 'id': user_id,
                 'nombre': nombre_completo,
                 'tipo': veto['tipo'],
                 'motivo': veto['motivo'],
                 'hasta': veto.get('hasta'),
-                'fecha_veto': veto.get('fecha_veto')
             })
-        
         return resultado
+
 
 # Instancia de la base de datos
 db = CebosDatabase()
+
+# ── Task reset diario ─────────────────────────────────────────────────────────
 
 @tasks.loop(minutes=1)
 async def tarea_reset_diario():
@@ -273,43 +229,27 @@ async def on_ready():
     if not tarea_reset_diario.is_running():
         tarea_reset_diario.start()
 
+# ── Comandos ──────────────────────────────────────────────────────────────────
+
 @bot.command(name='cebos')
 async def check_cebos(ctx, user_id: str):
-    """
-    Comprueba los cebos disponibles de un usuario
-    Uso: !cebos ID
-    Ejemplo: !cebos F1603Q49
-    """
-    
-    # Comprobar veto ANTES de cualquier otra cosa
     vetado, msg_veto = db.check_veto(user_id)
     if vetado:
-        embed = discord.Embed(
-            title="❌ Usuario Vetado",
-            description=msg_veto,
-            color=discord.Color.red()
-        )
+        embed = discord.Embed(title="❌ Usuario Vetado", description=msg_veto, color=discord.Color.red())
         await ctx.send(embed=embed)
         return
-    
-    # Obtener usuario sin crear uno vacío
+
     usuario = db.get_usuario_info(user_id)
     if not usuario:
-        # Crear el registro básico vacío
         usuario = db.crear_usuario(user_id, "", "")
-    
+
     cebos_usados, cebos_disponibles = db.get_cebos_disponibles(user_id)
-    
     nombre = usuario.get('nombre', '').strip()
     apellido = usuario.get('apellido', '').strip()
     nombre_completo = f"{nombre} {apellido}".strip() if (nombre or apellido) else None
-    
-    embed = discord.Embed(
-        title=f"📊 Estado de Cebos",
-        color=discord.Color.blue()
-    )
+
+    embed = discord.Embed(title="📊 Estado de Cebos", color=discord.Color.blue())
     embed.add_field(name="ID Usuario", value=user_id, inline=False)
-    
     if nombre_completo:
         embed.add_field(name="Nombre", value=nombre_completo, inline=False)
     else:
@@ -318,24 +258,16 @@ async def check_cebos(ctx, user_id: str):
             value=f"Usa `!nombre {user_id} Nombre Apellido` para registrar el nombre de este usuario.",
             inline=False
         )
-    
     embed.add_field(name="Cebos Usados Hoy", value=f"🟢 {cebos_usados}", inline=True)
     embed.add_field(name="Cebos Disponibles", value=f"🔵 {cebos_disponibles}", inline=True)
     embed.add_field(name="Límite Diario", value=f"⚫ {CEBOS_LIMIT}", inline=True)
     embed.add_field(name="⏰ Reset en", value=db.tiempo_hasta_reset(), inline=False)
     embed.set_footer(text=f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
     await ctx.send(embed=embed)
+
 
 @bot.command(name='añadir')
 async def add_cebos(ctx, user_id: str, cantidad: int):
-    """
-    Añade cebos a un usuario
-    Uso: !añadir ID CANTIDAD
-    Ejemplo: !añadir F1603Q49 5
-    """
-    
-    # Comprobar veto PRIMERO — si está vetado, no se añade nada
     vetado, msg_veto = db.check_veto(user_id)
     if vetado:
         embed = discord.Embed(
@@ -345,79 +277,85 @@ async def add_cebos(ctx, user_id: str, cantidad: int):
         )
         await ctx.send(embed=embed)
         return
-    
-    # Validar cantidad
+
     if cantidad <= 0:
         await ctx.send("❌ La cantidad debe ser mayor a 0")
         return
-    
-    # Crear registro si no existe (sin nombre)
+
     if not db.get_usuario_info(user_id):
         db.crear_usuario(user_id, "", "")
-    
-    # Intentar añadir cebos
+
     éxito, mensaje = db.añadir_cebos(user_id, cantidad)
-    
     color = discord.Color.green() if éxito else discord.Color.red()
     icon = "✅" if éxito else "❌"
-    
-    embed = discord.Embed(
-        title=f"{icon} Resultado",
-        description=mensaje,
-        color=color
-    )
+
+    embed = discord.Embed(title=f"{icon} Resultado", description=mensaje, color=color)
     embed.add_field(name="Usuario", value=user_id, inline=False)
-    
-    # Avisar si no tiene nombre
+
     if éxito and not db.tiene_nombre(user_id):
         embed.add_field(
             name="⚠️ Sin nombre registrado",
             value=f"Usa `!nombre {user_id} Nombre Apellido` para registrar el nombre de este usuario.",
             inline=False
         )
-    
+
     if éxito:
         cebos_usados, cebos_disponibles = db.get_cebos_disponibles(user_id)
         embed.add_field(name="Cebos Usados Hoy", value=cebos_usados, inline=True)
         embed.add_field(name="Cebos Disponibles", value=cebos_disponibles, inline=True)
-    
+
     await ctx.send(embed=embed)
+
 
 @bot.command(name='nombre')
 async def set_nombre(ctx, user_id: str, nombre: str, apellido: str):
-    """
-    Asigna o actualiza el nombre y apellido de un usuario
-    Uso: !nombre ID NOMBRE APELLIDO
-    Ejemplo: !nombre F1603Q49 Nero Kiraman
-    """
-    
     mensaje = db.set_nombre(user_id, nombre, apellido)
-    
-    embed = discord.Embed(
-        title="✏️ Nombre Actualizado",
-        description=mensaje,
-        color=discord.Color.green()
-    )
+    embed = discord.Embed(title="✏️ Nombre Actualizado", description=mensaje, color=discord.Color.green())
     embed.set_footer(text=f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
     await ctx.send(embed=embed)
+
+
+@bot.command(name='usuario')
+async def user_info(ctx, user_id: str):
+    usuario = db.get_usuario_info(user_id)
+    if not usuario:
+        await ctx.send(f"❌ Usuario `{user_id}` no encontrado en la base de datos")
+        return
+
+    vetado, msg_veto = db.check_veto(user_id)
+    cebos_usados, cebos_disponibles = db.get_cebos_disponibles(user_id)
+    nombre = usuario.get('nombre', '').strip()
+    apellido = usuario.get('apellido', '').strip()
+    nombre_completo = f"{nombre} {apellido}".strip() if (nombre or apellido) else None
+
+    embed = discord.Embed(title="👤 Información del Usuario", color=discord.Color.purple())
+    embed.add_field(name="ID", value=user_id, inline=False)
+    if nombre_completo:
+        embed.add_field(name="Nombre Completo", value=nombre_completo, inline=False)
+    else:
+        embed.add_field(
+            name="⚠️ Sin nombre registrado",
+            value=f"Usa `!nombre {user_id} Nombre Apellido` para registrar el nombre de este usuario.",
+            inline=False
+        )
+    embed.add_field(name="Estado", value="🚫 Vetado" if vetado else "✅ Activo", inline=True)
+    embed.add_field(name="Cebos Hoy", value=f"{cebos_usados}/{CEBOS_LIMIT}", inline=True)
+    embed.add_field(name="⏰ Reset en", value=db.tiempo_hasta_reset(), inline=True)
+    embed.add_field(name="Historial de Transacciones",
+                    value=f"Total: {len(usuario.get('historial', []))} transacciones",
+                    inline=False)
+    if vetado:
+        embed.add_field(name="Detalles de Veto", value=msg_veto, inline=False)
+    await ctx.send(embed=embed)
+
 
 @bot.command(name='vetar')
 async def ban_user(ctx, user_id: str, tipo: str, *, detalles: str):
-    """
-    Veta un usuario (temporal o permanente)
-    Uso: !vetar ID temporal MOTIVO DÍAS
-         !vetar ID permanente MOTIVO
-    Ejemplo: !vetar F1603Q49 temporal Comportamiento inapropiado 7
-    """
-    
-    # Permisos de administrador
     if not ctx.author.guild_permissions.administrator:
         await ctx.send("❌ Solo administradores pueden vetar usuarios")
         return
-    
+
     tipo = tipo.lower()
-    
     if tipo == 'temporal':
         try:
             partes = detalles.rsplit(' ', 1)
@@ -435,95 +373,27 @@ async def ban_user(ctx, user_id: str, tipo: str, *, detalles: str):
     else:
         await ctx.send("❌ Tipo debe ser 'temporal' o 'permanente'")
         return
-    
-    embed = discord.Embed(
-        title="🚫 Usuario Vetado",
-        description=mensaje,
-        color=discord.Color.red()
-    )
+
+    embed = discord.Embed(title="🚫 Usuario Vetado", description=mensaje, color=discord.Color.red())
     embed.set_footer(text=f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
     await ctx.send(embed=embed)
+
 
 @bot.command(name='desvetar')
 async def unban_user(ctx, user_id: str):
-    """
-    Desveta un usuario
-    Uso: !desvetar ID
-    """
-    
-    # Permisos de administrador
     if not ctx.author.guild_permissions.administrator:
         await ctx.send("❌ Solo administradores pueden desvetar usuarios")
         return
-    
+
     mensaje = db.desvetar_usuario(user_id)
-    
     color = discord.Color.green() if "✅" in mensaje else discord.Color.red()
-    embed = discord.Embed(
-        title="Desvetado",
-        description=mensaje,
-        color=color
-    )
-    
+    embed = discord.Embed(title="Desvetado", description=mensaje, color=color)
     await ctx.send(embed=embed)
 
-@bot.command(name='usuario')
-async def user_info(ctx, user_id: str):
-    """
-    Muestra información completa de un usuario
-    Uso: !usuario ID
-    """
-    
-    usuario = db.get_usuario_info(user_id)
-    
-    if not usuario:
-        await ctx.send(f"❌ Usuario `{user_id}` no encontrado en la base de datos")
-        return
-    
-    vetado, msg_veto = db.check_veto(user_id)
-    cebos_usados, cebos_disponibles = db.get_cebos_disponibles(user_id)
-    
-    nombre = usuario.get('nombre', '').strip()
-    apellido = usuario.get('apellido', '').strip()
-    nombre_completo = f"{nombre} {apellido}".strip() if (nombre or apellido) else None
-    
-    embed = discord.Embed(
-        title=f"👤 Información del Usuario",
-        color=discord.Color.purple()
-    )
-    embed.add_field(name="ID", value=user_id, inline=False)
-    
-    if nombre_completo:
-        embed.add_field(name="Nombre Completo", value=nombre_completo, inline=False)
-    else:
-        embed.add_field(
-            name="⚠️ Sin nombre registrado",
-            value=f"Usa `!nombre {user_id} Nombre Apellido` para registrar el nombre de este usuario.",
-            inline=False
-        )
-    
-    embed.add_field(name="Estado", value="🚫 Vetado" if vetado else "✅ Activo", inline=True)
-    embed.add_field(name="Cebos Hoy", value=f"{cebos_usados}/{CEBOS_LIMIT}", inline=True)
-    embed.add_field(name="⏰ Reset en", value=db.tiempo_hasta_reset(), inline=True)
-    embed.add_field(name="Historial de Transacciones", 
-                   value=f"Total: {len(usuario.get('historial', []))} transacciones", 
-                   inline=False)
-    
-    if vetado:
-        embed.add_field(name="Detalles de Veto", value=msg_veto, inline=False)
-    
-    await ctx.send(embed=embed)
 
 @bot.command(name='vetados')
 async def lista_vetados(ctx):
-    """
-    Muestra la lista de todos los usuarios vetados
-    Uso: !vetados
-    """
-    
     lista = db.get_lista_vetados()
-    
     if not lista:
         embed = discord.Embed(
             title="✅ No hay usuarios vetados",
@@ -532,89 +402,38 @@ async def lista_vetados(ctx):
         )
         await ctx.send(embed=embed)
         return
-    
-    embed = discord.Embed(
-        title=f"🚫 Usuarios Vetados ({len(lista)})",
-        color=discord.Color.red()
-    )
-    
+
+    embed = discord.Embed(title=f"🚫 Usuarios Vetados ({len(lista)})", color=discord.Color.red())
     for v in lista:
         if v['tipo'] == 'temporal' and v['hasta']:
             fecha_hasta = datetime.fromisoformat(v['hasta'])
-            dias_restantes = max(0, (fecha_hasta - datetime.now()).days)
+            dias_restantes = max(0, (fecha_hasta - db.now_spain()).days)
             tipo_str = f"Temporal · {dias_restantes} días restantes"
         else:
             tipo_str = "Permanente"
-        
         embed.add_field(
             name=f"🔴 {v['nombre']} — `{v['id']}`",
             value=f"**Tipo:** {tipo_str}\n**Motivo:** {v['motivo']}",
             inline=False
         )
-    
     embed.set_footer(text=f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     await ctx.send(embed=embed)
 
+
 @bot.command(name='ayuda')
 async def help_command(ctx):
-    """Muestra la ayuda de los comandos"""
-    
-    embed = discord.Embed(
-        title="📖 Ayuda - Bot de Cebos GTA V",
-        color=discord.Color.gold()
-    )
-    
-    embed.add_field(
-        name="!cebos <ID>",
-        value="Comprueba cebos disponibles\nEj: `!cebos F1603Q49`",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="!añadir <ID> <CANTIDAD>",
-        value="Añade cebos a un usuario\nEj: `!añadir F1603Q49 5`",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="!nombre <ID> <NOMBRE> <APELLIDO>",
-        value="Registra o actualiza el nombre de un usuario\nEj: `!nombre F1603Q49 Nero Kiraman`",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="!usuario <ID>",
-        value="Muestra información completa del usuario\nEj: `!usuario F1603Q49`",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="!vetar <ID> temporal <MOTIVO> <DÍAS>",
-        value="Veta temporalmente un usuario *(admin)*\nEj: `!vetar F1603Q49 temporal Mal comportamiento 7`",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="!vetar <ID> permanente <MOTIVO>",
-        value="Veta permanentemente un usuario *(admin)*\nEj: `!vetar F1603Q49 permanente Estafa`",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="!desvetar <ID>",
-        value="Desveta un usuario *(admin)*\nEj: `!desvetar F1603Q49`",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="!vetados",
-        value="Muestra la lista de todos los usuarios vetados\nEj: `!vetados`",
-        inline=False
-    )
-    
+    embed = discord.Embed(title="📖 Ayuda - Bot de Cebos GTA V", color=discord.Color.gold())
+    embed.add_field(name="!cebos <ID>", value="Comprueba cebos disponibles\nEj: `!cebos F1603Q49`", inline=False)
+    embed.add_field(name="!añadir <ID> <CANTIDAD>", value="Añade cebos a un usuario\nEj: `!añadir F1603Q49 5`", inline=False)
+    embed.add_field(name="!nombre <ID> <NOMBRE> <APELLIDO>", value="Registra o actualiza el nombre de un usuario\nEj: `!nombre F1603Q49 Nero Kiraman`", inline=False)
+    embed.add_field(name="!usuario <ID>", value="Muestra información completa del usuario\nEj: `!usuario F1603Q49`", inline=False)
+    embed.add_field(name="!vetar <ID> temporal <MOTIVO> <DÍAS>", value="Veta temporalmente un usuario *(admin)*\nEj: `!vetar F1603Q49 temporal Mal comportamiento 7`", inline=False)
+    embed.add_field(name="!vetar <ID> permanente <MOTIVO>", value="Veta permanentemente un usuario *(admin)*\nEj: `!vetar F1603Q49 permanente Estafa`", inline=False)
+    embed.add_field(name="!desvetar <ID>", value="Desveta un usuario *(admin)*\nEj: `!desvetar F1603Q49`", inline=False)
+    embed.add_field(name="!vetados", value="Muestra la lista de todos los usuarios vetados\nEj: `!vetados`", inline=False)
     embed.set_footer(text="Límite de cebos por día: 50")
-    
     await ctx.send(embed=embed)
+
 
 # Ejecutar el bot
 if __name__ == "__main__":
