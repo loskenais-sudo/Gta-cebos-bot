@@ -546,6 +546,12 @@ async def help_command(ctx):
     )
     
     embed.add_field(
+        name="!vetados",
+        value="Muestra la lista de todos los usuarios vetados\nEj: `!vetados`",
+        inline=False
+    )
+    
+    embed.add_field(
         name="!vetar <ID> temporal <MOTIVO> <DÍAS>",
         value="Veta temporalmente un usuario *(admin)*\nEj: `!vetar F1603Q49 temporal Mal comportamiento 7`",
         inline=False
@@ -560,12 +566,6 @@ async def help_command(ctx):
     embed.add_field(
         name="!desvetar <ID>",
         value="Desveta un usuario *(admin)*\nEj: `!desvetar F1603Q49`",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="!vetados",
-        value="Muestra la lista de todos los usuarios vetados\nEj: `!vetados`",
         inline=False
     )
     
