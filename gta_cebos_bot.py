@@ -1,10 +1,14 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord.ui import Button, View
 import json
 import os
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
+import pytz
+
+# Zona horaria de España
+TZ_SPAIN = pytz.timezone('Europe/Madrid')
 
 # Configuración del bot
 intents = discord.Intents.default()
@@ -51,9 +55,36 @@ class CebosDatabase:
         apellido = usuario.get('apellido', '').strip()
         return bool(nombre or apellido)
     
+    def now_spain(self) -> datetime:
+        """Devuelve la hora actual en España"""
+        return datetime.now(TZ_SPAIN)
+
+    def today_spain(self) -> str:
+        """Devuelve la fecha actual en España como string YYYY-MM-DD"""
+        return self.now_spain().strftime('%Y-%m-%d')
+
+    def tiempo_hasta_reset(self) -> str:
+        """Devuelve el tiempo restante hasta las 08:40 hora España"""
+        ahora = self.now_spain()
+        reset_hoy = ahora.replace(hour=8, minute=40, second=0, microsecond=0)
+        if ahora >= reset_hoy:
+            reset_hoy += timedelta(days=1)
+        diff = reset_hoy - ahora
+        horas, resto = divmod(int(diff.total_seconds()), 3600)
+        minutos = resto // 60
+        return f"{horas}h {minutos}min"
+
+    def reset_todos_cebos(self):
+        """Resetea los cebos de todos los usuarios"""
+        today = self.today_spain()
+        for usuario in self.data['usuarios'].values():
+            usuario['cebos_hoy'] = 0
+            usuario['fecha_actual'] = today
+        self.save_data()
+
     def crear_usuario(self, user_id: str, nombre: str, apellido: str) -> dict:
         """Crea o actualiza un usuario"""
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = self.today_spain()
         
         if user_id not in self.data['usuarios']:
             self.data['usuarios'][user_id] = {
@@ -81,7 +112,7 @@ class CebosDatabase:
     
     def set_nombre(self, user_id: str, nombre: str, apellido: str) -> str:
         """Asigna o actualiza el nombre de un usuario existente"""
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = self.today_spain()
         
         if user_id not in self.data['usuarios']:
             # Crear usuario nuevo con nombre
@@ -105,7 +136,7 @@ class CebosDatabase:
         if not usuario:
             return 0, CEBOS_LIMIT
         
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = self.today_spain()
         fecha_guardada = usuario.get('fecha_actual', today)
         
         # Si es un nuevo día, resetear
@@ -227,10 +258,20 @@ class CebosDatabase:
 # Instancia de la base de datos
 db = CebosDatabase()
 
+@tasks.loop(minutes=1)
+async def tarea_reset_diario():
+    """Comprueba cada minuto si son las 08:40 hora España y resetea los cebos"""
+    ahora = datetime.now(TZ_SPAIN)
+    if ahora.hour == 8 and ahora.minute == 40:
+        db.reset_todos_cebos()
+        print(f"✅ Cebos reseteados automáticamente a las 08:40 (hora España) — {ahora.strftime('%Y-%m-%d')}")
+
 @bot.event
 async def on_ready():
     print(f'✅ Bot conectado como {bot.user}')
     print('Comandos disponibles: !cebos, !añadir, !vetar, !desvetar, !usuario, !nombre, !vetados, !ayuda')
+    if not tarea_reset_diario.is_running():
+        tarea_reset_diario.start()
 
 @bot.command(name='cebos')
 async def check_cebos(ctx, user_id: str):
@@ -281,6 +322,7 @@ async def check_cebos(ctx, user_id: str):
     embed.add_field(name="Cebos Usados Hoy", value=f"🟢 {cebos_usados}", inline=True)
     embed.add_field(name="Cebos Disponibles", value=f"🔵 {cebos_disponibles}", inline=True)
     embed.add_field(name="Límite Diario", value=f"⚫ {CEBOS_LIMIT}", inline=True)
+    embed.add_field(name="⏰ Reset en", value=db.tiempo_hasta_reset(), inline=False)
     embed.set_footer(text=f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     await ctx.send(embed=embed)
@@ -463,6 +505,7 @@ async def user_info(ctx, user_id: str):
     
     embed.add_field(name="Estado", value="🚫 Vetado" if vetado else "✅ Activo", inline=True)
     embed.add_field(name="Cebos Hoy", value=f"{cebos_usados}/{CEBOS_LIMIT}", inline=True)
+    embed.add_field(name="⏰ Reset en", value=db.tiempo_hasta_reset(), inline=True)
     embed.add_field(name="Historial de Transacciones", 
                    value=f"Total: {len(usuario.get('historial', []))} transacciones", 
                    inline=False)
@@ -546,12 +589,6 @@ async def help_command(ctx):
     )
     
     embed.add_field(
-        name="!vetados",
-        value="Muestra la lista de todos los usuarios vetados\nEj: `!vetados`",
-        inline=False
-    )
-    
-    embed.add_field(
         name="!vetar <ID> temporal <MOTIVO> <DÍAS>",
         value="Veta temporalmente un usuario *(admin)*\nEj: `!vetar F1603Q49 temporal Mal comportamiento 7`",
         inline=False
@@ -566,6 +603,12 @@ async def help_command(ctx):
     embed.add_field(
         name="!desvetar <ID>",
         value="Desveta un usuario *(admin)*\nEj: `!desvetar F1603Q49`",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="!vetados",
+        value="Muestra la lista de todos los usuarios vetados\nEj: `!vetados`",
         inline=False
     )
     
