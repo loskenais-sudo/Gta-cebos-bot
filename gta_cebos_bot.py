@@ -37,11 +37,9 @@ def today_spain() -> str:
     return now_spain().strftime('%Y-%m-%d')
 
 def tiempo_hasta_reset() -> str:
-    """Devuelve el tiempo restante hasta las 08:40 hora España"""
+    """Devuelve el tiempo restante hasta las 00:00 hora España"""
     ahora = now_spain()
-    reset_hoy = ahora.replace(hour=8, minute=40, second=0, microsecond=0)
-    if ahora >= reset_hoy:
-        reset_hoy += timedelta(days=1)
+    reset_hoy = ahora.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     diff = reset_hoy - ahora
     horas, resto = divmod(int(diff.total_seconds()), 3600)
     minutos = resto // 60
@@ -209,9 +207,9 @@ async def get_lista_vetados() -> list:
 @tasks.loop(minutes=1)
 async def tarea_reset_diario():
     ahora = now_spain()
-    if ahora.hour == 8 and ahora.minute == 40:
+    if ahora.hour == 0 and ahora.minute == 0:
         await reset_todos_cebos()
-        print(f"✅ Cebos reseteados automáticamente a las 08:40 (hora España) — {ahora.strftime('%Y-%m-%d')}")
+        print(f"✅ Cebos reseteados automáticamente a las 00:00 (hora España) — {ahora.strftime('%Y-%m-%d')}")
 
 @bot.event
 async def on_ready():
