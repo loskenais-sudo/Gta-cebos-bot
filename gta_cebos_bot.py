@@ -136,7 +136,7 @@ async def get_cebos_disponibles(user_id: str) -> Tuple[int, int]:
     cebos_usados = doc.get('cebos_hoy', 0)
     return cebos_usados, max(0, CEBOS_LIMIT - cebos_usados)
 
-async def añadir_cebos(user_id: str, cantidad: int) -> Tuple[bool, str]:
+async def añadir_cebos(user_id: str, cantidad: int, vendedor_id: str = "", vendedor_nombre: str = "") -> Tuple[bool, str]:
     doc = await get_usuario(user_id)
     if not doc:
         return False, "Usuario no encontrado"
@@ -147,7 +147,9 @@ async def añadir_cebos(user_id: str, cantidad: int) -> Tuple[bool, str]:
     entrada = {
         "fecha": now_spain().isoformat(),
         "cantidad": cantidad,
-        "total_diario": nuevo_total
+        "total_diario": nuevo_total,
+        "vendedor_id": vendedor_id,
+        "vendedor_nombre": vendedor_nombre
     }
     await col_usuarios.update_one(
         {"_id": user_id},
@@ -302,12 +304,15 @@ async def add_cebos(ctx, user_id: str, cantidad: int):
     if not await get_usuario(user_id):
         await crear_usuario(user_id)
 
-    éxito, mensaje = await añadir_cebos(user_id, cantidad)
+    vendedor_nombre = ctx.author.display_name
+    vendedor_id = str(ctx.author.id)
+    éxito, mensaje = await añadir_cebos(user_id, cantidad, vendedor_id, vendedor_nombre)
     color = discord.Color.green() if éxito else discord.Color.red()
     icon = "✅" if éxito else "❌"
 
     embed = discord.Embed(title=f"{icon} Resultado", description=mensaje, color=color)
     embed.add_field(name="Usuario", value=user_id, inline=False)
+    embed.add_field(name="Vendedor", value=vendedor_nombre, inline=False)
 
     if éxito and not await tiene_nombre(user_id):
         embed.add_field(
@@ -451,7 +456,7 @@ async def lista_vetados(ctx):
 
 @bot.command(name='+')
 async def add_cebos_secreto(ctx, user_id: str, cantidad: int):
-    await add_cebos(ctx, user_id, cantidad)
+    await add_cebos(ctx, user_id, cantidad)  # hereda ctx.author, vendedor incluido
 
 
 async def get_ventas_rango(dt_inicio: datetime, dt_fin: datetime) -> list:
@@ -497,16 +502,17 @@ def construir_embed_ventas(resultados: list, titulo: str, subtitulo: str) -> lis
     total_cebos = sum(r['cantidad'] for r in resultados)
     total_transacciones = len(resultados)
 
-    # Agrupar por usuario
-    por_usuario = {}
+    # Agrupar por VENDEDOR
+    por_vendedor = {}
     for r in resultados:
-        uid = r['user_id']
-        if uid not in por_usuario:
-            por_usuario[uid] = {'nombre': r['nombre'], 'cantidad': 0, 'transacciones': 0}
-        por_usuario[uid]['cantidad'] += r['cantidad']
-        por_usuario[uid]['transacciones'] += 1
+        vid = r.get('vendedor_id', 'desconocido')
+        vnom = r.get('vendedor_nombre', '❓ Desconocido')
+        if vid not in por_vendedor:
+            por_vendedor[vid] = {'nombre': vnom, 'cantidad': 0, 'transacciones': 0}
+        por_vendedor[vid]['cantidad'] += r['cantidad']
+        por_vendedor[vid]['transacciones'] += 1
 
-    usuarios_ordenados = sorted(por_usuario.items(), key=lambda x: x[1]['cantidad'], reverse=True)
+    vendedores_ordenados = sorted(por_vendedor.items(), key=lambda x: x[1]['cantidad'], reverse=True)
 
     embeds = []
 
@@ -514,35 +520,19 @@ def construir_embed_ventas(resultados: list, titulo: str, subtitulo: str) -> lis
     embed_resumen = discord.Embed(title=titulo, color=discord.Color.blue())
     embed_resumen.add_field(name="📦 Total Cebos Vendidos", value=str(total_cebos), inline=True)
     embed_resumen.add_field(name="🔄 Total Transacciones", value=str(total_transacciones), inline=True)
-    embed_resumen.add_field(name="👥 Usuarios Activos", value=str(len(por_usuario)), inline=True)
+    embed_resumen.add_field(name="👥 Vendedores Activos", value=str(len(por_vendedor)), inline=True)
 
     ranking_lines = []
-    for i, (uid, data) in enumerate(usuarios_ordenados, 1):
+    for i, (vid, data) in enumerate(vendedores_ordenados, 1):
         medal = ["🥇", "🥈", "🥉"][i - 1] if i <= 3 else f"`{i}.`"
         ranking_lines.append(f"{medal} **{data['nombre']}** — {data['cantidad']} cebos ({data['transacciones']} ops)")
     embed_resumen.add_field(
-        name="📊 Ranking de Usuarios",
+        name="📊 Ranking de Vendedores",
         value="\n".join(ranking_lines) if ranking_lines else "Sin datos",
         inline=False
     )
     embed_resumen.set_footer(text=subtitulo)
     embeds.append(embed_resumen)
-
-    # Embeds de detalle: máx 10 transacciones por embed
-    chunk_size = 10
-    chunks = [resultados[i:i + chunk_size] for i in range(0, len(resultados), chunk_size)]
-    for idx, chunk in enumerate(chunks):
-        embed_detalle = discord.Embed(
-            title=f"📋 Detalle de Transacciones ({idx + 1}/{len(chunks)})",
-            color=discord.Color.green()
-        )
-        for r in chunk:
-            embed_detalle.add_field(
-                name=f"{r['fecha'].strftime('%d/%m %H:%M')} — {r['nombre']}",
-                value=f"**+{r['cantidad']} cebos** · Total día: {r['total_diario']}/{CEBOS_LIMIT}",
-                inline=False
-            )
-        embeds.append(embed_detalle)
 
     return embeds
 
