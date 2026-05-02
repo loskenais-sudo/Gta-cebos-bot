@@ -17,6 +17,26 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 # Límite de cebos por día
 CEBOS_LIMIT = 50
 
+# ── Roles ─────────────────────────────────────────────────────────────────────
+
+# Acceso completo (todos los comandos)
+ROLES_ADMIN = {"OWNER", "JEFE", "INSTRUCTOR", "Jefatura"}
+
+# Acceso limitado: !añadir, !nombre, !cebos, !usuario
+ROLES_NAUTICS = {"NAUTICS"}
+
+def tiene_rol_admin(member: discord.Member) -> bool:
+    """Comprueba si el miembro tiene un rol con acceso completo."""
+    return any(rol.name in ROLES_ADMIN for rol in member.roles)
+
+def tiene_rol_nautics(member: discord.Member) -> bool:
+    """Comprueba si el miembro tiene el rol NAUTICS."""
+    return any(rol.name in ROLES_NAUTICS for rol in member.roles)
+
+def tiene_acceso_basico(member: discord.Member) -> bool:
+    """Comprueba si el miembro tiene acceso a los comandos básicos."""
+    return tiene_rol_admin(member) or tiene_rol_nautics(member)
+
 # ── Conexión MongoDB (async con motor) ────────────────────────────────────────
 
 mongo_uri = os.getenv("MONGO_URI")
@@ -222,6 +242,10 @@ async def on_ready():
 
 @bot.command(name='cebos')
 async def check_cebos(ctx, user_id: str):
+    if not tiene_acceso_basico(ctx.author):
+        await ctx.send("❌ No tienes permiso para usar este comando.")
+        return
+
     vetado, msg_veto = await check_veto(user_id)
     if vetado:
         embed = discord.Embed(title="❌ Usuario Vetado", description=msg_veto, color=discord.Color.red())
@@ -257,6 +281,10 @@ async def check_cebos(ctx, user_id: str):
 
 @bot.command(name='añadir')
 async def add_cebos(ctx, user_id: str, cantidad: int):
+    if not tiene_acceso_basico(ctx.author):
+        await ctx.send("❌ No tienes permiso para usar este comando.")
+        return
+
     vetado, msg_veto = await check_veto(user_id)
     if vetado:
         embed = discord.Embed(
@@ -298,6 +326,10 @@ async def add_cebos(ctx, user_id: str, cantidad: int):
 
 @bot.command(name='nombre')
 async def cmd_nombre(ctx, user_id: str, nombre: str, apellido: str):
+    if not tiene_acceso_basico(ctx.author):
+        await ctx.send("❌ No tienes permiso para usar este comando.")
+        return
+
     mensaje = await set_nombre(user_id, nombre, apellido)
     embed = discord.Embed(title="✏️ Nombre Actualizado", description=mensaje, color=discord.Color.green())
     embed.set_footer(text=f"Fecha: {now_spain().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -306,6 +338,10 @@ async def cmd_nombre(ctx, user_id: str, nombre: str, apellido: str):
 
 @bot.command(name='usuario')
 async def user_info(ctx, user_id: str):
+    if not tiene_acceso_basico(ctx.author):
+        await ctx.send("❌ No tienes permiso para usar este comando.")
+        return
+
     usuario = await get_usuario(user_id)
     if not usuario:
         await ctx.send(f"❌ Usuario `{user_id}` no encontrado en la base de datos")
@@ -340,8 +376,8 @@ async def user_info(ctx, user_id: str):
 
 @bot.command(name='vetar')
 async def ban_user(ctx, user_id: str, tipo: str, *, detalles: str):
-    if not ctx.author.guild_permissions.administrator:
-        await ctx.send("❌ Solo administradores pueden vetar usuarios")
+    if not tiene_rol_admin(ctx.author):
+        await ctx.send("❌ No tienes permiso para usar este comando.")
         return
 
     tipo = tipo.lower()
@@ -370,8 +406,8 @@ async def ban_user(ctx, user_id: str, tipo: str, *, detalles: str):
 
 @bot.command(name='desvetar')
 async def unban_user(ctx, user_id: str):
-    if not ctx.author.guild_permissions.administrator:
-        await ctx.send("❌ Solo administradores pueden desvetar usuarios")
+    if not tiene_rol_admin(ctx.author):
+        await ctx.send("❌ No tienes permiso para usar este comando.")
         return
 
     mensaje = await desvetar_usuario(user_id)
@@ -382,6 +418,10 @@ async def unban_user(ctx, user_id: str):
 
 @bot.command(name='vetados')
 async def lista_vetados(ctx):
+    if not tiene_rol_admin(ctx.author):
+        await ctx.send("❌ No tienes permiso para usar este comando.")
+        return
+
     lista = await get_lista_vetados()
     if not lista:
         embed = discord.Embed(
@@ -409,24 +449,186 @@ async def lista_vetados(ctx):
     await ctx.send(embed=embed)
 
 
+@bot.command(name='+')
+async def add_cebos_secreto(ctx, user_id: str, cantidad: int):
+    await add_cebos(ctx, user_id, cantidad)
+
+
+async def get_ventas_rango(dt_inicio: datetime, dt_fin: datetime) -> list:
+    """Devuelve todas las entradas del historial entre dos fechas (hora España)."""
+    resultados = []
+    async for usuario in col_usuarios.find():
+        user_id = usuario['_id']
+        nombre = usuario.get('nombre', '').strip()
+        apellido = usuario.get('apellido', '').strip()
+        nombre_completo = f"{nombre} {apellido}".strip() if (nombre or apellido) else "⚠️ Sin nombre"
+        for entrada in usuario.get('historial', []):
+            try:
+                fecha_entrada = datetime.fromisoformat(entrada['fecha'])
+                if fecha_entrada.tzinfo is None:
+                    fecha_entrada = TZ_SPAIN.localize(fecha_entrada)
+                else:
+                    fecha_entrada = fecha_entrada.astimezone(TZ_SPAIN)
+                if dt_inicio <= fecha_entrada <= dt_fin:
+                    resultados.append({
+                        'user_id': user_id,
+                        'nombre': nombre_completo,
+                        'fecha': fecha_entrada,
+                        'cantidad': entrada['cantidad'],
+                        'total_diario': entrada['total_diario']
+                    })
+            except Exception:
+                continue
+    resultados.sort(key=lambda x: x['fecha'])
+    return resultados
+
+
+def construir_embed_ventas(resultados: list, titulo: str, subtitulo: str) -> list:
+    """Construye los embeds de ventas con resumen global y desglose por usuario."""
+    if not resultados:
+        embed = discord.Embed(
+            title=titulo,
+            description="No se encontraron ventas en ese período.",
+            color=discord.Color.orange()
+        )
+        embed.set_footer(text=subtitulo)
+        return [embed]
+
+    total_cebos = sum(r['cantidad'] for r in resultados)
+    total_transacciones = len(resultados)
+
+    # Agrupar por usuario
+    por_usuario = {}
+    for r in resultados:
+        uid = r['user_id']
+        if uid not in por_usuario:
+            por_usuario[uid] = {'nombre': r['nombre'], 'cantidad': 0, 'transacciones': 0}
+        por_usuario[uid]['cantidad'] += r['cantidad']
+        por_usuario[uid]['transacciones'] += 1
+
+    usuarios_ordenados = sorted(por_usuario.items(), key=lambda x: x[1]['cantidad'], reverse=True)
+
+    embeds = []
+
+    # Embed 1: Resumen global
+    embed_resumen = discord.Embed(title=titulo, color=discord.Color.blue())
+    embed_resumen.add_field(name="📦 Total Cebos Vendidos", value=str(total_cebos), inline=True)
+    embed_resumen.add_field(name="🔄 Total Transacciones", value=str(total_transacciones), inline=True)
+    embed_resumen.add_field(name="👥 Usuarios Activos", value=str(len(por_usuario)), inline=True)
+
+    ranking_lines = []
+    for i, (uid, data) in enumerate(usuarios_ordenados, 1):
+        medal = ["🥇", "🥈", "🥉"][i - 1] if i <= 3 else f"`{i}.`"
+        ranking_lines.append(f"{medal} **{data['nombre']}** — {data['cantidad']} cebos ({data['transacciones']} ops)")
+    embed_resumen.add_field(
+        name="📊 Ranking de Usuarios",
+        value="\n".join(ranking_lines) if ranking_lines else "Sin datos",
+        inline=False
+    )
+    embed_resumen.set_footer(text=subtitulo)
+    embeds.append(embed_resumen)
+
+    # Embeds de detalle: máx 10 transacciones por embed
+    chunk_size = 10
+    chunks = [resultados[i:i + chunk_size] for i in range(0, len(resultados), chunk_size)]
+    for idx, chunk in enumerate(chunks):
+        embed_detalle = discord.Embed(
+            title=f"📋 Detalle de Transacciones ({idx + 1}/{len(chunks)})",
+            color=discord.Color.green()
+        )
+        for r in chunk:
+            embed_detalle.add_field(
+                name=f"{r['fecha'].strftime('%d/%m %H:%M')} — {r['nombre']}",
+                value=f"**+{r['cantidad']} cebos** · Total día: {r['total_diario']}/{CEBOS_LIMIT}",
+                inline=False
+            )
+        embeds.append(embed_detalle)
+
+    return embeds
+
+
+@bot.command(name='ventas')
+async def cmd_ventas(ctx, fecha: str):
+    """Ventas de un día completo. Uso: !ventas 2025-05-01"""
+    if not tiene_rol_admin(ctx.author):
+        await ctx.send("❌ No tienes permiso para usar este comando.")
+        return
+
+    try:
+        dia = datetime.strptime(fecha, '%Y-%m-%d')
+    except ValueError:
+        await ctx.send("❌ Formato incorrecto. Usa: `!ventas YYYY-MM-DD`\nEj: `!ventas 2025-05-01`")
+        return
+
+    dt_inicio = TZ_SPAIN.localize(dia.replace(hour=0,  minute=0,  second=0))
+    dt_fin    = TZ_SPAIN.localize(dia.replace(hour=23, minute=59, second=59))
+
+    resultados = await get_ventas_rango(dt_inicio, dt_fin)
+    titulo    = f"📅 Ventas del {dia.strftime('%d/%m/%Y')}"
+    subtitulo = "Rango: 00:00 → 23:59 (hora España)"
+
+    for embed in construir_embed_ventas(resultados, titulo, subtitulo):
+        await ctx.send(embed=embed)
+
+
+@bot.command(name='ventas_rango')
+async def cmd_ventas_rango(ctx, fecha_inicio: str, hora_inicio: str, fecha_fin: str, hora_fin: str):
+    """Ventas en un rango con horas. Uso: !ventas_rango 2025-05-01 08:00 2025-05-01 20:00"""
+    if not tiene_rol_admin(ctx.author):
+        await ctx.send("❌ No tienes permiso para usar este comando.")
+        return
+
+    try:
+        dt_inicio = TZ_SPAIN.localize(datetime.strptime(f"{fecha_inicio} {hora_inicio}", '%Y-%m-%d %H:%M'))
+        dt_fin    = TZ_SPAIN.localize(datetime.strptime(f"{fecha_fin} {hora_fin}", '%Y-%m-%d %H:%M'))
+    except ValueError:
+        await ctx.send(
+            "❌ Formato incorrecto. Usa: `!ventas_rango YYYY-MM-DD HH:MM YYYY-MM-DD HH:MM`\n"
+            "Ej: `!ventas_rango 2025-05-01 08:00 2025-05-02 20:00`"
+        )
+        return
+
+    if dt_inicio >= dt_fin:
+        await ctx.send("❌ La fecha de inicio debe ser anterior a la fecha de fin.")
+        return
+
+    resultados = await get_ventas_rango(dt_inicio, dt_fin)
+    titulo    = f"📅 Ventas: {dt_inicio.strftime('%d/%m/%Y %H:%M')} → {dt_fin.strftime('%d/%m/%Y %H:%M')}"
+    subtitulo = "Hora España"
+
+    for embed in construir_embed_ventas(resultados, titulo, subtitulo):
+        await ctx.send(embed=embed)
+
+
 @bot.command(name='ayuda')
 async def help_command(ctx):
     embed = discord.Embed(title="📖 Ayuda - Bot de Cebos GTA V", color=discord.Color.gold())
+
+    # Comandos básicos (NAUTICS + roles admin)
     embed.add_field(name="!cebos <ID>", value="Comprueba cebos disponibles\nEj: `!cebos F1603Q49`", inline=False)
     embed.add_field(name="!añadir <ID> <CANTIDAD>", value="Añade cebos a un usuario\nEj: `!añadir F1603Q49 5`", inline=False)
     embed.add_field(name="!nombre <ID> <NOMBRE> <APELLIDO>", value="Registra o actualiza el nombre de un usuario\nEj: `!nombre F1603Q49 Nero Kiraman`", inline=False)
     embed.add_field(name="!usuario <ID>", value="Muestra información completa del usuario\nEj: `!usuario F1603Q49`", inline=False)
-    embed.add_field(name="!vetar <ID> temporal <MOTIVO> <DÍAS>", value="Veta temporalmente un usuario *(admin)*\nEj: `!vetar F1603Q49 temporal Mal comportamiento 7`", inline=False)
-    embed.add_field(name="!vetar <ID> permanente <MOTIVO>", value="Veta permanentemente un usuario *(admin)*\nEj: `!vetar F1603Q49 permanente Estafa`", inline=False)
-    embed.add_field(name="!desvetar <ID>", value="Desveta un usuario *(admin)*\nEj: `!desvetar F1603Q49`", inline=False)
+
+    # Comandos solo admin
+    embed.add_field(
+        name="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🔒 Solo OWNER · JEFE · INSTRUCTOR · Jefatura",
+        value="\u200b",
+        inline=False
+    )
+    embed.add_field(name="!vetar <ID> temporal <MOTIVO> <DÍAS>", value="Veta temporalmente un usuario\nEj: `!vetar F1603Q49 temporal Mal comportamiento 7`", inline=False)
+    embed.add_field(name="!vetar <ID> permanente <MOTIVO>", value="Veta permanentemente un usuario\nEj: `!vetar F1603Q49 permanente Estafa`", inline=False)
+    embed.add_field(name="!desvetar <ID>", value="Desveta un usuario\nEj: `!desvetar F1603Q49`", inline=False)
     embed.add_field(name="!vetados", value="Muestra la lista de todos los usuarios vetados\nEj: `!vetados`", inline=False)
+    embed.add_field(name="!ventas <FECHA>", value="Ventas de un día completo\nEj: `!ventas 2025-05-01`", inline=False)
+    embed.add_field(name="!ventas_rango <F_INICIO> <H_INICIO> <F_FIN> <H_FIN>", value="Ventas en un rango de fechas y horas\nEj: `!ventas_rango 2025-05-01 08:00 2025-05-01 20:00`", inline=False)
+
     embed.set_footer(text="Límite de cebos por día: 50")
     await ctx.send(embed=embed)
 
 
 # Ejecutar el bot
 if __name__ == "__main__":
-    # Carga el token desde las variables de entorno de Railway
     TOKEN = os.getenv("TOKEN")
     if TOKEN:
         bot.run(TOKEN)
