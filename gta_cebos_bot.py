@@ -480,7 +480,9 @@ async def get_ventas_rango(dt_inicio: datetime, dt_fin: datetime) -> list:
                         'nombre': nombre_completo,
                         'fecha': fecha_entrada,
                         'cantidad': entrada['cantidad'],
-                        'total_diario': entrada['total_diario']
+                        'total_diario': entrada['total_diario'],
+                        'vendedor_id': entrada.get('vendedor_id', 'desconocido'),
+                        'vendedor_nombre': entrada.get('vendedor_nombre', '❓ Desconocido')
                     })
             except Exception:
                 continue
